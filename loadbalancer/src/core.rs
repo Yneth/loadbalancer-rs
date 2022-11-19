@@ -1,14 +1,13 @@
-use std::io::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::Instrument;
 
-use crate::{AppContext, ok, transfer};
+use crate::{any_ok, AppContext, transfer};
 use crate::config::AppConfig;
 use crate::conn;
 use crate::transfer::TransferResult;
@@ -17,7 +16,7 @@ struct PortHandler<IO> {
     context: Arc<AppContext>,
     app_config: Arc<AppConfig>,
     addr: SocketAddr,
-    io: IO,
+    src: IO,
 }
 
 impl PortHandler<TcpStream> {
@@ -29,20 +28,19 @@ impl PortHandler<TcpStream> {
 
             loop {
                 tracing::debug!("connect");
-                let mut target = ok!(ok!(timeout(cli.target_connect_timeout(), conn::connect(&self.app_config)).await));
+                let dst_connect_fut = timeout(cli.target_connect_timeout(), conn::connect(&self.app_config));
+                let mut dst = any_ok!(any_ok!(dst_connect_fut.await));
 
                 tracing::debug!("transferring...");
-                let transfer_fut = transfer::transfer(&mut self.io, &mut target);
-                let transfer_res = ok!(timeout(cli.inactivity_timeout(), transfer_fut).await);
+                let transfer_fut = transfer::transfer(&mut self.src, &mut dst);
+                let transfer_res = any_ok!(timeout(cli.inactivity_timeout(), transfer_fut).await);
 
-                // formatter:off
                 match transfer_res {
                     TransferResult::SourceErr(e) => return Err(e.into()),
                     TransferResult::SourceEOF => anyhow::bail!("source connection EOF"),
                     TransferResult::TargetErr(e) => tracing::debug!("target connection error, reason: {:?}", e),
                     TransferResult::TargetEOF => tracing::debug!("target connection EOF"),
                 }
-                // formatter:on
             }
         }
             .instrument(span)
@@ -54,7 +52,8 @@ async fn start_port_listener(context: Arc<AppContext>, app: AppConfig, port: u16
     tracing::info!("starting listener for app: {} on port: {}", app.name(), port);
 
     let app_ref = Arc::new(app);
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await
+        .with_context(|| format!("failed to listen on port {}", port))?;
     loop {
         let (io, addr) = match listener.accept().await {
             Err(e) => {
@@ -69,7 +68,7 @@ async fn start_port_listener(context: Arc<AppContext>, app: AppConfig, port: u16
             context: context.clone(),
             app_config: app_ref.clone(),
             addr,
-            io,
+            src: io,
         };
         tokio::spawn(async move {
             if let Err(e) = port_handler.run().await {
@@ -95,7 +94,7 @@ pub async fn start(context: Arc<AppContext>) -> Result<()> {
     }
 
     if let Some(join_res) = ports.join_next().await {
-        ok!(join_res)
+        any_ok!(join_res)
     } else {
         tracing::info!("no ports started, exiting...");
         Ok(())

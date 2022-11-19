@@ -5,7 +5,7 @@ use anyhow::Result;
 // slightly improves performance over elvis operator
 // to be used in performance critical code
 #[macro_export]
-macro_rules! ok {
+macro_rules! any_ok {
     ($result:expr) => {
         match $result {
             Err(e) => return Err(anyhow::Error::from(e)),

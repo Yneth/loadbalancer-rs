@@ -5,7 +5,7 @@ use std::task::{Context, Poll, ready};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::copy::CopyBuffer;
+use crate::copy::{CopyBuffer, Source};
 
 pub enum TransferResult {
     SourceEOF,
@@ -26,7 +26,7 @@ fn transfer_one_direction<A, B>(
     buf: &mut CopyBuffer,
     r: &mut A,
     w: &mut B,
-) -> Poll<io::Result<u64>>
+) -> Poll<Result<u64, (Source, io::Error)>>
     where
         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -74,14 +74,16 @@ impl<'a, A, B> Future for Transfer<'a, A, B>
 
         // check without waiting
         match a_to_b {
-            Poll::Ready(Err(e)) => return Poll::Ready(TransferResult::SourceErr(e)),
+            Poll::Ready(Err((Source::Reader, e))) => return Poll::Ready(TransferResult::SourceErr(e)),
+            Poll::Ready(Err((Source::Writer, e))) => return Poll::Ready(TransferResult::TargetErr(e)),
             Poll::Ready(Ok(_)) => return Poll::Ready(TransferResult::SourceEOF),
             Poll::Pending => {}
         }
 
         // wait
         match ready!(b_to_a) {
-            Err(e) => Poll::Ready(TransferResult::TargetErr(e)),
+            Err((Source::Reader, e)) => Poll::Ready(TransferResult::TargetErr(e)),
+            Err((Source::Writer, e)) => Poll::Ready(TransferResult::SourceErr(e)),
             Ok(_) => Poll::Ready(TransferResult::TargetEOF),
         }
     }
