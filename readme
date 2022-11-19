@@ -1,1 +1,1 @@
-Fast L4 loadbalancer
+Fast L4 TCP loadbalancer written in rust & tokio
