@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Instant, Sleep};
+use tracing::Span;
 
 use pin_project_lite::pin_project;
 
@@ -23,8 +24,13 @@ pin_project! {
     struct Transfer<'a, A: ?Sized, B: ?Sized> {
         a: &'a mut A,
         b: &'a mut B,
+
         a_to_b: CopyBuffer,
+        a_span: Span,
+
         b_to_a: CopyBuffer,
+        b_span: Span,
+
         timeout_duration: Duration,
         #[pin]
         timeout_fut: Sleep,
@@ -63,15 +69,11 @@ impl<'a, A, B> Future for Transfer<'a, A, B>
             Poll::Pending => me.timeout_fut.as_mut().reset(Instant::now() + *me.timeout_duration),
         }
 
-        let a_to_b = {
-            tracing::info_span!("src -> dst").in_scope(||
-                transfer_one_direction(cx, me.a_to_b, me.a, me.b))
-        };
+        let a_to_b = me.a_span.in_scope(||
+            transfer_one_direction(cx, me.a_to_b, me.a, me.b));
 
-        let b_to_a = {
-            tracing::info_span!("dst -> src").in_scope(||
-                transfer_one_direction(cx, me.b_to_a, me.b, me.a))
-        };
+        let b_to_a = me.b_span.in_scope(||
+            transfer_one_direction(cx, me.b_to_a, me.b, me.a));
 
         // buf.poll_copy completes only in cases when
         //  * waiting for new data to arrive
@@ -110,7 +112,9 @@ pub async fn transfer<A, B>(a: &mut A, b: &mut B, inactivity_timeout: Duration) 
         a,
         b,
         a_to_b: CopyBuffer::new(),
+        a_span: tracing::info_span!("src -> dst"),
         b_to_a: CopyBuffer::new(),
+        b_span: tracing::info_span!("dst -> src"),
         timeout_duration: inactivity_timeout,
         timeout_fut: tokio::time::sleep(inactivity_timeout),
     }
