@@ -32,10 +32,13 @@ impl PortHandler<TcpStream> {
                 let mut dst = any_ok!(any_ok!(dst_connect_fut.await));
 
                 tracing::debug!("transferring...");
-                let transfer_fut = transfer::transfer(&mut self.src, &mut dst);
-                let transfer_res = any_ok!(timeout(cli.inactivity_timeout(), transfer_fut).await);
+                let transfer_fut = transfer::transfer(
+                    &mut self.src,
+                    &mut dst,
+                    cli.inactivity_timeout()
+                );
 
-                match transfer_res {
+                match transfer_fut.await {
                     TransferResult::SourceErr(e) => return Err(e.into()),
                     TransferResult::SourceEOF => anyhow::bail!("source connection EOF"),
                     TransferResult::TargetErr(e) => tracing::debug!("target connection error, reason: {:?}", e),

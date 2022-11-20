@@ -1,9 +1,12 @@
 use std::future::Future;
 use std::io;
+use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::{Instant, Sleep};
 
 use crate::copy::{CopyBuffer, Source};
 
@@ -14,11 +17,14 @@ pub enum TransferResult {
     TargetErr(io::Error),
 }
 
+
 struct Transfer<'a, A: ?Sized, B: ?Sized> {
     a: &'a mut A,
     b: &'a mut B,
     a_to_b: CopyBuffer,
     b_to_a: CopyBuffer,
+    timeout_duration: Duration,
+    timeout_fut: Pin<Box<Sleep>>,
 }
 
 fn transfer_one_direction<A, B>(
@@ -51,7 +57,14 @@ impl<'a, A, B> Future for Transfer<'a, A, B>
             b,
             a_to_b,
             b_to_a,
+            timeout_duration,
+            timeout_fut,
         } = &mut *self;
+
+        match timeout_fut.as_mut().poll(cx) {
+            Poll::Ready(_) => return Poll::Ready(TransferResult::SourceErr(ErrorKind::TimedOut.into())),
+            Poll::Pending => timeout_fut.as_mut().reset(Instant::now() + *timeout_duration),
+        }
 
         let a_to_b = {
             tracing::info_span!("src -> dst").in_scope(||
@@ -91,7 +104,7 @@ impl<'a, A, B> Future for Transfer<'a, A, B>
 
 /// copy of tokio::io::copy_bidirectional with a modification
 /// to stop copying as soon as at least one stream sends EOF
-pub async fn transfer<A, B>(a: &mut A, b: &mut B) -> TransferResult
+pub async fn transfer<A, B>(a: &mut A, b: &mut B, inactivity_timeout: Duration) -> TransferResult
     where
         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -101,6 +114,8 @@ pub async fn transfer<A, B>(a: &mut A, b: &mut B) -> TransferResult
         b,
         a_to_b: CopyBuffer::new(),
         b_to_a: CopyBuffer::new(),
+        timeout_duration: inactivity_timeout,
+        timeout_fut: Box::pin(tokio::time::sleep(inactivity_timeout)),
     }
         .await
 }
