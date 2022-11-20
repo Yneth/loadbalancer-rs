@@ -162,6 +162,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap-verbosity-flag",
+ "pin-project-lite",
  "rand",
  "rlimit",
  "serde",

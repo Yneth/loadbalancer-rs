@@ -8,6 +8,8 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Instant, Sleep};
 
+use pin_project_lite::pin_project;
+
 use crate::copy::{CopyBuffer, Source};
 
 pub enum TransferResult {
@@ -17,14 +19,16 @@ pub enum TransferResult {
     TargetErr(io::Error),
 }
 
-
-struct Transfer<'a, A: ?Sized, B: ?Sized> {
-    a: &'a mut A,
-    b: &'a mut B,
-    a_to_b: CopyBuffer,
-    b_to_a: CopyBuffer,
-    timeout_duration: Duration,
-    timeout_fut: Pin<Box<Sleep>>,
+pin_project! {
+    struct Transfer<'a, A: ?Sized, B: ?Sized> {
+        a: &'a mut A,
+        b: &'a mut B,
+        a_to_b: CopyBuffer,
+        b_to_a: CopyBuffer,
+        timeout_duration: Duration,
+        #[pin]
+        timeout_fut: Sleep,
+    }
 }
 
 fn transfer_one_direction<A, B>(
@@ -50,30 +54,23 @@ impl<'a, A, B> Future for Transfer<'a, A, B>
 {
     type Output = TransferResult;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Unpack self into mut refs to each field to avoid borrow check issues.
-        let Transfer {
-            a,
-            b,
-            a_to_b,
-            b_to_a,
-            timeout_duration,
-            timeout_fut,
-        } = &mut *self;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut me = self.project();
 
-        match timeout_fut.as_mut().poll(cx) {
+        // check if triggered by timeout
+        match me.timeout_fut.as_mut().poll(cx) {
             Poll::Ready(_) => return Poll::Ready(TransferResult::SourceErr(ErrorKind::TimedOut.into())),
-            Poll::Pending => timeout_fut.as_mut().reset(Instant::now() + *timeout_duration),
+            Poll::Pending => me.timeout_fut.as_mut().reset(Instant::now() + *me.timeout_duration),
         }
 
         let a_to_b = {
             tracing::info_span!("src -> dst").in_scope(||
-                transfer_one_direction(cx, a_to_b, &mut *a, &mut *b))
+                transfer_one_direction(cx, me.a_to_b, me.a, me.b))
         };
 
         let b_to_a = {
             tracing::info_span!("dst -> src").in_scope(||
-                transfer_one_direction(cx, b_to_a, &mut *b, &mut *a))
+                transfer_one_direction(cx, me.b_to_a, me.b, me.a))
         };
 
         // buf.poll_copy completes only in cases when
@@ -115,7 +112,7 @@ pub async fn transfer<A, B>(a: &mut A, b: &mut B, inactivity_timeout: Duration) 
         a_to_b: CopyBuffer::new(),
         b_to_a: CopyBuffer::new(),
         timeout_duration: inactivity_timeout,
-        timeout_fut: Box::pin(tokio::time::sleep(inactivity_timeout)),
+        timeout_fut: tokio::time::sleep(inactivity_timeout),
     }
         .await
 }
